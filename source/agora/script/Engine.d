@@ -1050,15 +1050,29 @@ public class Engine
 
         const sig = sig_bytes.toSignature();
 
-        // workaround: input index not explicitly passed in
-        import std.algorithm : countUntil;
-        const long input_idx = tx.inputs.countUntil(input);
-        assert(input_idx != -1, "Input does not belong to this transaction");
-
-        const Hash challenge = getSequenceChallenge(tx, sequence, input_idx);
+        Hash challenge;
+        try
+            challenge = getSequenceChallenge(tx, sequence);
+        catch (Exception e)
+        {
+            static immutable err = "Can not generate challenge for " ~ op.to!string;
+            return err;
+        }
         sig_valid = pubkey.verify(sig, challenge);
         return null;
     }
+}
+
+/// With this struct encoded in the `payload` field sequence
+/// signatures will allow multiple inputs but only a single output
+/// to be added to the TX.
+public struct SequencePayload
+{
+    /// Only input to include in the challenge
+    long input_idx;
+
+    /// Only output to exclude from the challenge
+    long output_idx;
 }
 
 /*******************************************************************************
@@ -1068,24 +1082,45 @@ public class Engine
     Params:
         tx = the transaction to sign
         sequence = the sequence ID to hash
-        input_idx = the associated input index we're signing for
 
     Returns:
         the challenge as a hash
 
 *******************************************************************************/
 
-public Hash getSequenceChallenge (in Transaction tx, in ulong sequence,
-    in ulong input_idx) nothrow @safe
+public Hash getSequenceChallenge (in Transaction tx, in ulong sequence) @safe
 {
-    assert(input_idx < tx.inputs.length, "Input index is out of range");
+    import std.exception;
 
-    Transaction cloned;
-    // it's ok, we'll dupe the array before modification
-    () @trusted { cloned = *cast(Transaction*)&tx; }();
-    cloned.inputs = cloned.inputs.dup;
-    cloned.inputs[input_idx] = Input.init;  // blank out matching input
-    return hashMulti(cloned, sequence);
+    assert(tx.inputs.length > 0);
+    enforce((tx.inputs.length == 1) ^ (tx.payload.length != 0), "Malformed Trigger/Update TX");
+
+    ulong blank_input_idx = 0; // Settlement/Update TXs normally only have a single input
+    auto outputs = tx.outputs.dup;
+
+    // We have extra inputs/outputs on this TX, exclude them from challenge
+    if (tx.payload.length != 0)
+    {
+        import std.algorithm.mutation : remove;
+        import agora.serialization.Serializer;
+
+        auto payload = deserializeFull!SequencePayload(tx.payload);
+        if (payload.input_idx >= 0)
+        {
+            enforce(payload.input_idx < tx.inputs.length, "Malformed Trigger/Update TX");
+            blank_input_idx = payload.input_idx;
+        }
+        if (payload.output_idx >= 0)
+        {
+            enforce(payload.output_idx < outputs.length, "Malformed Trigger/Update TX");
+            outputs = outputs.remove(payload.output_idx);
+        }
+    }
+
+    // blank out matching input unlock, we could also just blank the sig bytes
+    Input flash_input = tx.inputs[blank_input_idx];
+    flash_input.unlock = Unlock.init;
+    return hashMulti(flash_input, outputs, sequence);
 }
 
 version (unittest)
@@ -1575,6 +1610,8 @@ unittest
 // OP.CHECK_SEQ_SIG / OP.VERIFY_SEQ_SIG
 unittest
 {
+    import agora.serialization.Serializer;
+
     // Expected top to bottom on stack: <min_seq> <key> [<new_seq> <sig>]
     //
     // Unlock script pushes in order: [<sig>, <new_seq>]
@@ -1587,7 +1624,7 @@ unittest
     //   <sig>
 
     scope engine = new Engine(TestStackMaxTotalSize, TestStackMaxItemSize);
-    const Transaction tx = Transaction([Input.init], null);
+    Transaction tx = Transaction([Input.init], null);
     assert(engine.execute(
         Lock(LockType.Script, [OP.CHECK_SEQ_SIG]), Unlock.init, tx, tx.inputs[0]) ==
         "CHECK_SEQ_SIG opcode requires 4 items on the stack");
@@ -1676,7 +1713,7 @@ unittest
         "Script failed");  // still fails, signature didn't hash the sequence
 
     // create the proper signature which blanks the input and encodes the sequence
-    const challenge_0 = getSequenceChallenge(tx, seq_0, 0);
+    const challenge_0 = getSequenceChallenge(tx, seq_0);
     const seq_0_sig = kp.sign(challenge_0);
     assert(engine.execute(
         Lock(LockType.Script,
@@ -1708,7 +1745,7 @@ unittest
             ~ toPushOpcode(seq_1_bytes)), tx, tx.inputs[0]),
         "Script failed");
 
-    const challenge_1 = getSequenceChallenge(tx, seq_1, 0);
+    const challenge_1 = getSequenceChallenge(tx, seq_1);
     const seq_1_sig = kp.sign(challenge_1);
     assert(engine.execute(
         Lock(LockType.Script,
@@ -1739,6 +1776,54 @@ unittest
             [ubyte(64)] ~ seq_0_sig.toBlob()[]
             ~ toPushOpcode(seq_1_bytes)), tx, tx.inputs[0]) ==  // sig mismatch
         "VERIFY_SEQ_SIG signature failed validation");
+
+    tx.inputs ~= Input.init;
+    assert(engine.execute(
+        Lock(LockType.Script,
+              [ubyte(32)] ~ kp.address[]
+            ~ toPushOpcode(seq_0_bytes)
+            ~ [ubyte(OP.CHECK_SEQ_SIG)]),
+        Unlock(
+            [ubyte(64)] ~ seq_1_sig.toBlob()[]
+            ~ toPushOpcode(seq_1_bytes)), tx, tx.inputs[0])
+        == "Can not generate challenge for CHECK_SEQ_SIG"); // Not excluded new input
+
+    SequencePayload payload = SequencePayload(1, -1);
+    tx.payload = serializeFull(payload);
+    tx.inputs ~= Input.init;
+    assert(engine.execute(
+        Lock(LockType.Script,
+              [ubyte(32)] ~ kp.address[]
+            ~ toPushOpcode(seq_0_bytes)
+            ~ [ubyte(OP.CHECK_SEQ_SIG)]),
+        Unlock(
+            [ubyte(64)] ~ seq_1_sig.toBlob()[]
+            ~ toPushOpcode(seq_1_bytes)), tx, tx.inputs[0])
+        is null); // Should pass with the excluded input
+
+    payload = SequencePayload(1, 0);
+    tx.payload = serializeFull(payload);
+    tx.outputs ~= Output.init;
+    assert(engine.execute(
+        Lock(LockType.Script,
+              [ubyte(32)] ~ kp.address[]
+            ~ toPushOpcode(seq_0_bytes)
+            ~ [ubyte(OP.CHECK_SEQ_SIG)]),
+        Unlock(
+            [ubyte(64)] ~ seq_1_sig.toBlob()[]
+            ~ toPushOpcode(seq_1_bytes)), tx, tx.inputs[0])
+        is null); // Should pass with the excluded input/output
+
+    tx.outputs ~= Output.init;
+    assert(engine.execute(
+        Lock(LockType.Script,
+              [ubyte(32)] ~ kp.address[]
+            ~ toPushOpcode(seq_0_bytes)
+            ~ [ubyte(OP.CHECK_SEQ_SIG)]),
+        Unlock(
+            [ubyte(64)] ~ seq_1_sig.toBlob()[]
+            ~ toPushOpcode(seq_1_bytes)), tx, tx.inputs[0])
+        == "Script failed"); // Cannot add more than 1 output
 }
 
 // OP.VERIFY_LOCK_HEIGHT

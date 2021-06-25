@@ -487,7 +487,7 @@ public class UpdateSigner
             const update_key = getUpdateScalar(this.kp.secret,
                 this.conf.funding_tx_hash);
             const challenge_update = getSequenceChallenge(update_tx,
-                this.seq_id, 0);  // todo: should not be hardcoded
+                this.seq_id);
             return sign(update_key, this.conf.update_pair_pk, nonce_pair_pk,
                 priv_nonce.update.v, challenge_update);
         }
@@ -558,11 +558,9 @@ public class UpdateSigner
             this.conf.funding_tx_hash, this.seq_id, this.conf.num_peers);
         const nonce_pair_pk = priv_nonce.settle.V + peer_nonce.settle;
 
-        const uint input_idx = 0; // todo: this should ideally not be hardcoded
         auto settle_tx = createSettleTx(update_utxo_hash, this.conf.settle_time,
             outputs);
-        const challenge_settle = getSequenceChallenge(settle_tx, this.seq_id,
-            input_idx);
+        const challenge_settle = getSequenceChallenge(settle_tx, this.seq_id);
 
         const sig = sign(settle_key, settle_pair_pk, nonce_pair_pk,
             priv_nonce.settle.v, challenge_settle);
