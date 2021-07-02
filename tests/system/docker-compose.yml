@@ -94,3 +94,14 @@ services:
       - node-7
     volumes:
       - "./node/faucet/config.yaml:/root/faucet/config.yaml"
+
+  # HAR recorder
+  har-recorder:
+    image: "ubuntu"
+    command: >
+      bash -c "apt-get update -qq > /dev/null &&
+        apt-get install python3-pip -y -qq > /dev/null  &&
+        pip -q install gitlab-har-recorder --extra-index-url https://gitlab.com/api/v4/projects/22441624/packages/pypi/simple &&
+        (timeout -s SIGTERM 2m gl-har-recorder start -p 8080 -o /root/har-recorder/output.har -f; exit 0)"
+    volumes:
+      - "./:/root/har-recorder/"

@@ -7,7 +7,7 @@ jobs:
   main:
     name: Integration
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
 
     - uses: actions/checkout@v2
@@ -51,6 +51,53 @@ jobs:
       run: |
         cd ${{ github.workspace }}/agora/
         ./ci/system_integration_test.d
+
+    - name: Prepare fuzzer
+      if: github.event_name == 'push'
+      run: |
+        cd ${{ github.workspace }}/
+        docker pull mcr.microsoft.com/restlerfuzzer/restler:v7.4.0
+
+        sudo apt install nodejs npm
+        git clone https://github.com/dcarr178/har2openapi
+        cd har2openapi
+        npm install
+        cp ${{ github.workspace }}/agora/tests/system/config.json.har2openapi config.json
+
+    - name: Generate SPEC
+      if: github.event_name == 'push'
+      run: |
+        cd ${{ github.workspace }}/agora/
+        # disable HTTPS on all nodes by removing the related files
+        rm -rf tests/system/node/*/*.pem
+
+        # replace https urls with http
+        for node in tests/system/node/*;
+        do
+          sed -i 's/https/http/g' $node/config.yaml;
+        done
+
+        # enable proxy on node-2
+        cp tests/system/node/2/config.yaml tests/system/node/2/config.yaml.bkp
+        echo -e "\nproxy:\n  url: http://har-recorder:8080" >>  tests/system/node/2/config.yaml
+
+        # nobuild, integration test already built the image
+        ./ci/fuzz.d nobuild record
+
+        # disable proxy
+        rm tests/system/node/2/config.yaml
+        mv tests/system/node/2/config.yaml.bkp tests/system/node/2/config.yaml
+
+        cd ${{ github.workspace }}/har2openapi
+        # generate spec
+        node index.js examples ${{ github.workspace }}/agora/tests/system/output.har
+
+        stat output/examples.spec.json
+
+    - uses: actions/upload-artifact@v2
+      with:
+        name: OpenAPI Specification
+        path: ${{ github.workspace }}/har2openapi/output/examples.spec.json
 
     - name: Change permission on lst files
       run: |

@@ -1,5 +1,5 @@
 #!/usr/bin/env rdmd
-module system_integration_test;
+module fuzzer;
 
 private:
 
@@ -9,7 +9,10 @@ import std.format;
 import std.path;
 import std.process;
 import std.stdio;
+import std.conv;
 import core.sys.posix.signal;
+import core.thread;
+import core.time;
 
 /// Root of the repository
 immutable RootPath = __FILE_FULL_PATH__.dirName.dirName;
@@ -26,20 +29,11 @@ immutable BuildImg = [ "docker", "build", "--build-arg", `DUB_OPTIONS=-b cov`,
                        "-t", "agora", RootPath, ];
 immutable TestContainer = [ "docker", "run", "agora", "--help", ];
 immutable DockerCompose = [ "docker-compose", "-f", ComposeFile, "--env-file", EnvFile ];
-immutable DockerComposeUp = DockerCompose ~ [ "up", "--abort-on-container-exit",
-    "--scale", "har-recorder=0",];
+immutable DockerComposeUp = DockerCompose ~ [ "up", "--abort-on-container-exit", ];
+immutable DockerComposeUpNoRecord = DockerComposeUp ~ ["--scale", "har-recorder=0", ];
 immutable DockerComposeDown = DockerCompose ~ [ "down", "-t", "30", ];
 immutable DockerComposeLogs = DockerCompose ~ [ "logs", "-t", ];
-immutable RunIntegrationTests = [ "dub", "--root", IntegrationPath, "--",
-                                    "https://127.0.0.1:4000",
-                                    "https://127.0.0.1:4002",
-                                    "https://127.0.0.1:4003",
-                                    "https://127.0.0.1:4004",
-                                    "https://127.0.0.1:4005",
-                                    "https://127.0.0.1:4006",
-                                    "https://127.0.0.1:4007",
-];
-immutable Cleanup = [ "rm", "-rf", IntegrationPath.buildPath("node/0/.cache/"),
+immutable Cleanup = [ "sudo", "rm", "-rf", IntegrationPath.buildPath("node/0/.cache/"),
                       IntegrationPath.buildPath("node/2/.cache/"),
                       IntegrationPath.buildPath("node/3/.cache/"),
                       IntegrationPath.buildPath("node/4/.cache/"),
@@ -53,6 +47,18 @@ private int main (string[] args)
     // Use a recognizable value so that if an unexpected code path is taken,
     // we see it. Success sets this to 0, failure to 1.x
     int code = 42;
+
+    // Need atleast the duration arg
+    if (args.length < 2)
+    {
+        writeln("Fuzzing duration (in minutes) should be passed as the last argument");
+        return 1;
+    }   
+    // last arg should be the duration
+    bool record_har = args[$-1] == "record";
+    uint duration;
+    if (!record_har)
+        duration = to!uint(args[$-1]);
 
     // If the user pass `nobuild` as first argument, skip docker image build,
     // which is the most expensive operation this script performs
@@ -71,38 +77,24 @@ private int main (string[] args)
     // the test starts (or after it completes).
     // So we start this process with `spawnProcess` and kill it with SIGINT,
     // simulating a CTRL+C
-    writeln(DockerComposeUp);
-    auto upPid = spawnProcess(DockerComposeUp);
+    auto DockerComposeUpCmd = record_har ? DockerComposeUp : DockerComposeUpNoRecord;
+    writeln(DockerComposeUpCmd);
+    auto upPid = spawnProcess(DockerComposeUpCmd);
 
-    try
+    if (!record_har)
     {
-        // Now run the tests
-        runCmd(RunIntegrationTests);
-        code = 0;
-    }
-    catch (Exception e)
-    {
-        // Full node only
-        runCmd(DockerComposeLogs ~ "node-0");
-
-        // Validators
-        runCmd(DockerComposeLogs ~ "node-2");
-        runCmd(DockerComposeLogs ~ "node-3");
-        runCmd(DockerComposeLogs ~ "node-4");
-        runCmd(DockerComposeLogs ~ "node-5");
-        runCmd(DockerComposeLogs ~ "node-6");
-        runCmd(DockerComposeLogs ~ "node-7");
-        code = 1;
+        writefln("Fuzzing for %d minutes..", duration);
+        Thread.sleep(dur!"minutes"(duration));
+        upPid.kill(SIGINT);
     }
 
-    upPid.kill(SIGINT);
-    runCmd(DockerComposeDown);
+    code = 0;
     if (auto upCode = upPid.wait())
     {
         writeln("docker-compose up returned error code: ", upCode);
         code = 1;
     }
-
+    runCmd(DockerComposeDown);
     return code;
 }
 
