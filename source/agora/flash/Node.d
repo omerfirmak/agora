@@ -176,7 +176,7 @@ public abstract class FlashNode : FlashControlAPI
 
         this.channels = Channel.loadChannels(this.conf, this.db,
             &this.getFlashClient, engine, taskman,
-            &this.putTransaction, &this.paymentRouter,
+            &this.publishTransaction, &this.paymentRouter,
             &this.onChannelNotify,
             &this.onPaymentComplete, &this.onUpdateComplete);
 
@@ -588,7 +588,7 @@ public abstract class FlashNode : FlashControlAPI
         const key_pair = KeyPair.fromSeed(*secret_key);
         auto channel = new Channel(this.conf, chan_conf, key_pair,
             priv_nonce, peer_nonce, peer, this.engine, this.taskman,
-            &this.putTransaction, &this.paymentRouter, &this.onChannelNotify,
+            &this.publishTransaction, &this.paymentRouter, &this.onChannelNotify,
             &this.onPaymentComplete, &this.onUpdateComplete, this.db);
 
         this.channels[recv_pk][chan_conf.chan_id] = channel;
@@ -1192,7 +1192,7 @@ public abstract class FlashNode : FlashControlAPI
 
         auto channel = new Channel(this.conf, chan_conf, key_pair,
             priv_nonce, result.value, peer, this.engine, this.taskman,
-            &this.putTransaction, &this.paymentRouter, &this.onChannelNotify,
+            &this.publishTransaction, &this.paymentRouter, &this.onChannelNotify,
             &this.onPaymentComplete, &this.onUpdateComplete, this.db);
         this.channels[reg_pk][chan_conf.chan_id] = channel;
     }
@@ -1291,6 +1291,43 @@ public abstract class FlashNode : FlashControlAPI
             return false;
 
         return true;
+    }
+
+    ///
+    protected void publishTransaction (Transaction tx, PublicKey pk)
+    {
+        // Add fees paid by the given pk
+        if (pk != PublicKey.init)
+        {
+            Amount fee = this.listener.getEstimatedTxFee();
+
+            // overpay by a margin, for faster externalization
+            auto margin = fee;
+            margin.percentage(10); // todo: make configurable
+
+            if (!fee.add(margin) || !fee.mul(tx.sizeInBytes))
+                assert(0); // todo: we should somehow be able to recover from this, maybe a default fee?
+
+            auto fee_utxos = this.listener.getFeeUTXOs(pk, fee);
+            Input[] fee_inputs = fee_utxos.utxos.map!(utxo => Input(utxo)).array;
+            Output[] fee_outputs;
+
+            if (fee_utxos.total_value > fee)
+            {
+                if (!fee_utxos.total_value.sub(fee))
+                    assert(0);
+                fee_outputs ~= Output(fee_utxos.total_value, pk);
+            }
+
+            Input flash_input = tx.inputs[0];
+            tx = Transaction(tx.inputs ~ fee_inputs, tx.outputs ~ fee_outputs);
+
+            SequencePayload seq_payload = SequencePayload(tx.inputs.countUntil(flash_input),
+                fee_outputs.length ? tx.outputs.countUntil(fee_outputs[0]) : -1);
+            tx.payload = serializeFull(seq_payload);
+        }
+
+        this.putTransaction(tx);
     }
 }
 

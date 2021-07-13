@@ -59,7 +59,7 @@ mixin AddLogger!();
 public class Channel
 {
     /// Used to publish funding / trigger / update / settlement txs to blockchain
-    public const void delegate (Transaction) txPublisher;
+    public const void delegate (Transaction, PublicKey) txPublisher;
 
     /// Database
     private ManagedDatabase db;
@@ -140,7 +140,7 @@ public class Channel
     public this (FlashConfig flash_conf, ChannelConfig conf, in KeyPair kp,
         PrivateNonce priv_nonce, PublicNonce peer_nonce, FlashAPI peer,
         Engine engine, ITaskManager taskman,
-        void delegate (Transaction) txPublisher,
+        void delegate (Transaction, PublicKey) txPublisher,
         PaymentRouter paymentRouter,
         OnChannelNotify onChannelNotify,
         OnPaymentComplete onPaymentComplete,
@@ -197,7 +197,7 @@ public class Channel
 
     public this (in PublicKey key, Hash chan_id, FlashConfig flash_conf, Engine engine,
         ITaskManager taskman,
-        void delegate (Transaction) txPublisher,
+        void delegate (Transaction, PublicKey) txPublisher,
         PaymentRouter paymentRouter,
         OnChannelNotify onChannelNotify,
         OnPaymentComplete onPaymentComplete,
@@ -251,7 +251,8 @@ public class Channel
         ManagedDatabase db,
         FlashAPI delegate (in PublicKey peer_pk, Duration timeout) getFlashClient,
         Engine engine, ITaskManager taskman,
-        void delegate (Transaction) txPublisher, PaymentRouter paymentRouter,
+        void delegate (Transaction, PublicKey) txPublisher,
+        PaymentRouter paymentRouter,
         OnChannelNotify onChannelNotify,
         OnPaymentComplete onPaymentComplete,
         OnUpdateComplete onUpdateComplete )
@@ -633,7 +634,7 @@ LOuter: while (1)
                 = genKeyUnlock(this.kp.sign(this.conf.funding_tx));
 
             log.info("Publishing funding tx..");
-            this.txPublisher(this.funding_tx_signed);
+            this.txPublisher(this.funding_tx_signed, PublicKey.init);
         }
 
         this.trigger_utxo = UTXO.getHash(update_pair.update_tx.hashFull(), 0);
@@ -748,7 +749,7 @@ LOuter: while (1)
             const update_tx = this.channel_updates[$ - 1].update_tx;
             log.info("{}: Publishing latest update tx {}: {}",
                 this.kp.address.flashPrettify, this.channel_updates.length, update_tx.hashFull().flashPrettify);
-            this.txPublisher(cast()update_tx);
+            this.txPublisher(cast()update_tx, this.kp.address);
         }
     }
 
@@ -775,7 +776,7 @@ LOuter: while (1)
             log.info("{}: Publishing last settle tx {}: {}",
                 this.kp.address.flashPrettify, this.channel_updates.length,
                 settle_tx.hashFull().flashPrettify);
-            this.txPublisher(cast()settle_tx);
+            this.txPublisher(cast()settle_tx, this.kp.address);
         }
     }
 
@@ -1694,15 +1695,15 @@ LOuter: while (1)
             return false;
 
         // todo: this is also the close tx, check its utxo first
-        if (tx.inputs[0].utxo == UTXO.getHash(
-            hashFull(this.conf.funding_tx), this.conf.funding_utxo_idx))
+        if (tx.inputs.canFind(UTXO.getHash(
+            hashFull(this.conf.funding_tx), this.conf.funding_utxo_idx)))
             return true;
 
         // todo: could there be a timing issue here if our `channel_updates`
         // are not updated fast enough? chances are very slim, need to verify.
         // todo: optimize by caching trigger tx utxo
         return this.channel_updates.length > 0
-            && tx.inputs[0].utxo == this.trigger_utxo;
+            && tx.inputs.canFind(this.trigger_utxo);
     }
 
     /***************************************************************************
@@ -1818,7 +1819,7 @@ LOuter: while (1)
             log.info("{}: Publishing trigger tx: {}",
                 this.kp.address.flashPrettify,
                 trigger_tx.hashFull().flashPrettify);
-            this.txPublisher(trigger_tx);
+            this.txPublisher(trigger_tx, this.kp.address);
         });
 
         return Result!bool(true);
@@ -1967,7 +1968,7 @@ LOuter: while (1)
         // todo: schedule this
         log.info("{}: Publishing close tx: {}",
             this.kp.address.flashPrettify, this.pending_close.tx.hashFull.flashPrettify);
-        this.txPublisher(this.pending_close.tx);
+        this.txPublisher(this.pending_close.tx, PublicKey.init);
     }
 
     /***************************************************************************
@@ -2223,7 +2224,7 @@ LOuter: while (1)
         const update_tx = this.channel_updates[index].update_tx;
         log.info("{}: Publishing update tx index {}: {}",
             this.kp.address.flashPrettify, index, update_tx.hashFull().flashPrettify);
-        this.txPublisher(cast()update_tx);
+        this.txPublisher(cast()update_tx, this.kp.address);
         return cast()update_tx;
     }
 
